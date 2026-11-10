@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chat, papillon et laser</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #7ec850; height: 100%; }
+  canvas { display: block; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d');
+  let W, H;
+  function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+  addEventListener('resize', resize);
+  resize();
+
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const TAU = Math.PI * 2;
+
+  // ---------- Souris / laser ----------
+  const mouse = { x: innerWidth / 2, y: innerHeight / 2 };
+  let laserActive = false;
+  addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  addEventListener('mousedown', () => { laserActive = true; });
+  addEventListener('mouseup',   () => { /* le laser reste tant que la souris bouge un peu */ });
+  addEventListener('mouseleave', () => { laserActive = false; });
+  addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    mouse.x = t.clientX; mouse.y = t.clientY; laserActive = true;
+  });
+  addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    mouse.x = t.clientX; mouse.y = t.clientY;
+  });
+  addEventListener('touchend', () => { laserActive = false; });
+
+  // ---------- Papillon ----------
+  const butterfly = {
+    x: W * 0.7, y: H * 0.3, vx: 0, vy: 0,
+    angle: 0, wing: 0, orbitPhase: 0, dodgeTimer: 0,
+    update(dt, t) {
+      this.wing += dt * 14;
+      this.dodgeTimer = Math.max(0, this.dodgeTimer - dt);
+      if (this.dodgeTimer > 0) {
+        // esquive rapide
+        this.x += this.vx * dt; this.y += this.vy * dt;
+        this.vx *= 0.94; this.vy *= 0.94;
+      } else if (cat.attention === 'laser') {
+        // tournoie autour du chat, agité, pour récupérer l'attention
+        this.orbitPhase += dt * 3.2;
+        const r = 90 + Math.sin(t * 5 + this.orbitPhase) * 25;
+        const tx = cat.x + Math.cos(this.orbitPhase) * r;
+        const ty = cat.y - cat.headOffset - 30 + Math.sin(this.orbitPhase * 2) * 20;
+        this.x += (tx - this.x) * Math.min(1, dt * 4);
+        this.y += (ty - this.y) * Math.min(1, dt * 4);
+      } else {
+        // voltige erratique autour du chat
+        const wander = 140 + Math.sin(t * 0.7) * 60;
+        const a = t * 0.8 + Math.sin(t * 2.3) * 1.2;
+        const bob = Math.sin(t * 3.7) * 30;
+        const tx = cat.x + Math.cos(a) * wander;
+        const ty = cat.y - 120 + Math.sin(a * 1.3) * 60 + bob;
+        this.x += (tx - this.x) * Math.min(1, dt * 1.5);
+        this.y += (ty - this.y) * Math.min(1, dt * 1.5);
+      }
+      this.angle = Math.atan2(cat.y - this.y, cat.x - this.x);
+      this.x = Math.max(30, Math.min(W - 30, this.x));
+      this.y = Math.max(30, Math.min(H - 30, this.y));
+    },
+    dodge(fromX, fromY) {
+      const a = Math.atan2(this.y - fromY, this.x - fromX) + rand(-0.6, 0.6);
+      this.vx = Math.cos(a) * 520;
+      this.vy = Math.sin(a) * 520 - 120;
+      this.dodgeTimer = 0.55;
+    },
+    draw(t) {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      const flap = Math.sin(this.wing) * 0.9;
+      const bob = Math.sin(t * 6) * 2;
+      ctx.translate(0, bob);
+      // ailes
+      for (const s of [-1, 1]) {
+        ctx.save();
+        ctx.scale(s, 1);
+        ctx.rotate(flap * 0.5);
+        const grad = ctx.createLinearGradient(0, 0, 26, -18);
+        grad.addColorStop(0, '#f5a623');
+        grad.addColorStop(1, '#e8542f');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.ellipse(12, -8, 13, 9, -0.5, 0, TAU);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(10, 4, 9, 6, 0.4, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(60,30,80,0.5)';
+        ctx.beginPath();
+        ctx.ellipse(14, -10, 4, 3, -0.5, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+      }
+      // corps
+      ctx.fillStyle = '#3b2a45';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 4, 9, 0, 0, TAU);
+      ctx.fill();
+      // antennes
+      ctx.strokeStyle = '#3b2a45';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-2, -7); ctx.quadraticCurveTo(-6, -14, -9, -15);
+      ctx.moveTo(2, -7);  ctx.quadraticCurveTo(6, -14, 9, -15);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+
+  // ---------- Chat ----------
+  const cat = {
+    x: W / 2, y: H * 0.65, facing: 1,
+    state: 'idle', stateT: 0, cooldown: 0,
+    attention: 'butterfly',
+    headOffset: 38,
+    pounceFrom: null, pounceTo: null, jumpT: 0,
+    legPhase: 0, tailT: 0, blink: 0, earT: 0,
+    get target() { return this.attention === 'laser' && laserActive ? mouse : butterfly; },
+    update(dt, t) {
+      this.stateT += dt;
+      this.cooldown = Math.max(0, this.cooldown - dt);
+      this.tailT += dt;
+      this.earT += dt;
+      this.blink -= dt;
+      if (this.blink < -3) this.blink = 0.12;
+
+      // attention : le laser prime sur le papillon
+      this.attention = laserActive ? 'laser' : 'butterfly';
+      const tgt = this.target;
+
+      if (this.state === 'idle' || this.state === 'chase') {
+        const d = dist(this, { x: tgt.x, y: tgt.y });
+        this.facing = tgt.x >= this.x ? 1 : -1;
+        if (this.state === 'idle') {
+          if (d < 260 && this.cooldown <= 0) this.setState('chase');
+        } else {
+          // courir vers la cible
+          const speed = 340;
+          const dx = tgt.x - this.x, dy = tgt.y - this.y;
+          const dd = Math.hypot(dx, dy) || 1;
+          this.x += (dx / dd) * speed * dt;
+          this.y += (dy / dd) * speed * dt * 0.6;
+          this.legPhase += dt * 16;
+          if (d < 120 && this.cooldown <= 0) {
+            this.setState('crouch');
+          }
+        }
+      } else if (this.state === 'crouch') {
+        if (this.stateT > 0.45) {
+          this.pounceFrom = { x: this.x, y: this.y };
+          const tx = tgt.x, ty = tgt.y;
+          // il rate toujours : la cible esquive au moment du bond
+          if (this.attention === 'butterfly') butterfly.dodge(this.x, this.y);
+          this.pounceTo = { x: tx + rand(-40, 40), y: ty + rand(-20, 30) };
+          this.setState('pounce');
+          this.jumpT = 0;
+        }
+      } else if (this.state === 'pounce') {
+        this.jumpT += dt * 2.6;
+        const p = Math.min(1, this.jumpT);
+        const e = p * p * (3 - 2 * p);
+        this.x = this.pounceFrom.x + (this.pounceTo.x - this.pounceFrom.x) * e;
+        this.y = this.pounceFrom.y + (this.pounceTo.y - this.pounceFrom.y) * e;
+        this.arc = Math.sin(p * Math.PI) * 45;
+        if (this.jumpT >= 1) {
+          this.arc = 0;
+          this.cooldown = rand(1.2, 2.2);
+          this.setState('miss');
+        }
+      } else if (this.state === 'miss') {
+        // petite secousse de frustration
+        if (this.stateT > 0.5) this.setState('idle');
+      }
+      this.x = Math.max(60, Math.min(W - 60, this.x));
+      this.y = Math.max(120, Math.min(H - 40, this.y));
+    },
+    setState(s) { this.state = s; this.stateT = 0; },
+    draw(t) {
+      const s = this.facing;
+      const crouch = this.state === 'crouch' ? Math.min(1, this.stateT / 0.45) : 0;
+      const squash = this.state === 'miss' ? Math.sin(this.stateT * 25) * 0.06 * (1 - this.stateT * 2) : 0;
+      const lift = this.arc || 0;
+      ctx.save();
+      ctx.translate(this.x, this.y - lift);
+      ctx.scale(s * (1 + squash), 1 - squash - crouch * 0.18);
+      const bodyY = 0;
+      const bodyH = 34 * (1 - crouch * 0.25);
+
+      // ombre
+      ctx.restore();
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y + 6, 46, 8, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.translate(this.x, this.y - lift);
+      ctx.scale(s, 1);
+      const orange = '#f2a950';
+      const dark = '#c97f2e';
+
+      // queue
+      ctx.strokeStyle = orange;
+      ctx.lineWidth = 9;
+      ctx.lineCap = 'round';
+      const wag = this.attention === 'laser' ? Math.sin(this.tailT * 18) * 0.5 : Math.sin(this.tailT * 3) * 0.3;
+      ctx.beginPath();
+      ctx.moveTo(-32, bodyY - 12);
+      ctx.quadraticCurveTo(-58, bodyY - 30 + wag * 18, -50 + wag * 10, bodyY - 58);
+      ctx.stroke();
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 9;
+      ctx.setLineDash([0, 14, 8, 20]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // pattes
+      const run = (this.state === 'chase' || this.state === 'pounce') ? 1 : 0;
+      const lp = this.legPhase;
+      const legSwing = (i) => run ? Math.sin(lp + i * 1.6) * 8 : Math.sin(t * 1.5 + i) * 1.5;
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 7;
+      for (let i = 0; i < 4; i++) {
+        const lx = -20 + i * 14;
+        const ly = bodyY + bodyH / 2 - 4;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly - 6);
+        ctx.lineTo(lx + legSwing(i), ly + 6 - crouch * 6);
+        ctx.stroke();
+      }
+
+      // corps
+      ctx.fillStyle = orange;
+      ctx.beginPath();
+      ctx.ellipse(-4, bodyY, 36, bodyH / 2, 0, 0, TAU);
+      ctx.fill();
+      // rayures
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = 4;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-18 + i * 12, bodyY - bodyH / 2 + 2);
+        ctx.quadraticCurveTo(-14 + i * 12, bodyY, -18 + i * 12, bodyY + bodyH / 2 - 2);
+        ctx.stroke();
+      }
+      // poitrail
+      ctx.fillStyle = '#fbe9cc';
+      ctx.beginPath();
+      ctx.ellipse(18, bodyY + 4, 12, bodyH / 2 - 4, 0.3, 0, TAU);
+      ctx.fill();
+
+      // tête
+      const headX = 30, headY = bodyY - this.headOffset - crouch * 8 + (this.state === 'miss' ? Math.sin(this.stateT * 30) * 2 : 0);
+      const headTilt = this.state === 'crouch' ? 0.2 : (this.state === 'pounce' ? -0.15 : 0);
+      ctx.save();
+      ctx.translate(headX, headY);
+      ctx.rotate(headTilt);
+      // oreilles (pivotent vers la cible)
+      const earFlick = Math.sin(this.earT * 2.1) > 0.95 ? 0.3 : 0;
+      for (const es of [-1, 1]) {
+        ctx.save();
+        ctx.translate(es * 11, -12);
+        ctx.rotate(es * (0.15 + earFlick));
+        ctx.fillStyle = orange;
+        ctx.beginPath();
+        ctx.moveTo(-6, 2); ctx.lineTo(0, -14); ctx.lineTo(6, 2);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#e88888';
+        ctx.beginPath();
+        ctx.moveTo(-3, 1); ctx.lineTo(0, -9); ctx.lineTo(3, 1);
+        ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      ctx.fillStyle = orange;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 17, 15, 0, 0, TAU);
+      ctx.fill();
+      // museau
+      ctx.fillStyle = '#fbe9cc';
+      ctx.beginPath();
+      ctx.ellipse(5, 6, 9, 7, 0, 0, TAU);
+      ctx.fill();
+      // yeux : pupilles suivent la cible
+      const tgt = this.target;
+      let la = Math.atan2(tgt.y - (this.y - this.headOffset), tgt.x - this.x);
+      if (s < 0) la = Math.PI - la;
+      const px = Math.cos(la) * 3, py = Math.sin(la) * 2;
+      const blinking = this.blink > 0;
+      for (const es of [-1, 1]) {
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.ellipse(es * 7 + 2, -3, 5, blinking ? 1 : 6, 0, 0, TAU);
+        ctx.fill();
+        if (!blinking) {
+          ctx.fillStyle = '#2c7be0';
+          ctx.beginPath();
+          ctx.ellipse(es * 7 + 2 + px, -3 + py, 3.4, 4.4, 0, 0, TAU);
+          ctx.fill();
+          ctx.fillStyle = '#111';
+          ctx.beginPath();
+          ctx.ellipse(es * 7 + 2 + px, -3 + py, 1.6, 4, 0, 0, TAU);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(es * 7 + 1 + px, -5 + py, 1.2, 0, TAU);
+          ctx.fill();
+        }
+      }
+      // nez et bouche
+      ctx.fillStyle = '#e88';
+      ctx.beginPath();
+      ctx.moveTo(11, 3); ctx.lineTo(15, 3); ctx.lineTo(13, 6);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#8a5a20';
+      ctx.lineWidth = 1.4;
+      const mouthOpen = (this.state === 'pounce' || this.state === 'miss');
+      ctx.beginPath();
+      if (mouthOpen) {
+        ctx.arc(13, 9, 4, 0, Math.PI);
+        ctx.fillStyle = '#b3541f';
+        ctx.fill();
+      } else {
+        ctx.moveTo(13, 6);
+        ctx.quadraticCurveTo(11, 9, 9, 7);
+        ctx.moveTo(13, 6);
+        ctx.quadraticCurveTo(15, 9, 17, 7);
+      }
+      ctx.stroke();
+      // moustaches
+      ctx.strokeStyle = 'rgba(60,40,20,0.7)';
+      ctx.lineWidth = 1;
+      for (const wy of [-1, 1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(14, 5 + wy * 2);
+        ctx.quadraticCurveTo(22, 4 + wy * 3, 27, 2 + wy * 5);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.restore();
+    }
+  };
+
+  // ---------- Laser ----------
+  function drawLaser(t) {
+    if (!laserActive) return;
+    const x = mouse.x, y = mouse.y;
+    ctx.save();
+    // halo
+    const halo = ctx.createRadialGradient(x, y, 0, x, y, 26);
+    halo.addColorStop(0, 'rgba(255,40,40,0.55)');
+    halo.addColorStop(1, 'rgba(255,40,40,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(x, y, 26, 0, TAU);
+    ctx.fill();
+    // point
+    const pulse = 4.5 + Math.sin(t * 10) * 0.8;
+    ctx.fillStyle = '#ff2222';
+    ctx.beginPath();
+    ctx.arc(x, y, pulse, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#ffd0d0';
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ---------- Scène ----------
+  let clouds = [];
+  function initClouds() {
+    clouds = Array.from({ length: 5 }, () => ({
+      x: rand(0, W), y: rand(30, H * 0.3), r: rand(24, 50), s: rand(4, 12)
+    }));
+  }
+  initClouds();
+
+  function drawBackground(t) {
+    // ciel
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#8fd3ff');
+    sky.addColorStop(0.65, '#cdeeff');
+    sky.addColorStop(1, '#8bd45c');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+    // soleil
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath();
+    ctx.arc(W - 90, 80, 38, 0, TAU);
+    ctx.fill();
+    // nuages
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (const c of clouds) {
+      c.x += c.s * 0.016;
+      if (c.x - c.r * 2 > W) c.x = -c.r * 2;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r, 0, TAU);
+      ctx.arc(c.x + c.r * 0.8, c.y + 6, c.r * 0.7, 0, TAU);
+      ctx.arc(c.x - c.r * 0.8, c.y + 8, c.r * 0.6, 0, TAU);
+      ctx.fill();
+    }
+    // herbe
+    ctx.fillStyle = '#6ab648';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) {
+      ctx.lineTo(x, H - 40 - Math.sin(x * 0.02) * 10);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+    // touffes
+    ctx.strokeStyle = '#4e9a35';
+    ctx.lineWidth = 2;
+    for (let x = 30; x < W; x += 90) {
+      const gy = H - 40 - Math.sin(x * 0.02) * 10 + 20;
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x + i * 4, gy);
+        ctx.quadraticCurveTo(x + i * 8 + Math.sin(t + x) * 2, gy - 10, x + i * 10, gy - 16);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // ---------- Boucle ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    const t = now / 1000;
+    last = now;
+    drawBackground(t);
+    cat.update(dt, t);
+    butterfly.update(dt, t);
+    // le papillon essaie de récupérer l'attention pendant un pounce laser
+    if (laserActive && cat.state === 'pounce' && Math.random() < 0.02) {
+      cat.attention = 'butterfly';
+    }
+    cat.draw(t);
+    butterfly.draw(t);
+    drawLaser(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
