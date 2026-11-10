@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chat vs Papillon</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f7e3bd; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 50%; bottom: 8%; transform: translateX(-50%);
+    font-family: "Trebuchet MS", system-ui, sans-serif; font-size: 18px; color: #5a4028;
+    background: rgba(255,255,255,.6); padding: 10px 20px; border-radius: 999px;
+    transition: opacity .5s; pointer-events: none; white-space: nowrap;
+  }
+  #hint.hidden { opacity: 0; }
+  #legend {
+    position: fixed; left: 16px; bottom: 12px;
+    font-family: "Trebuchet MS", system-ui, sans-serif; font-size: 13px;
+    color: rgba(90,64,40,.8); pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="hint">Cliquez n'importe où pour allumer le laser 🔴</div>
+<div id="legend">🔴 Cliquez : allumer / éteindre le laser</div>
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
+
+let W = 0, H = 0, GROUND = 0;
+const mouse = { x: 0, y: 0 };
+const laser = { on: false };
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+
+const cat = {
+  x: window.innerWidth * 0.45, y: 0,
+  facing: 1, state: 'idle', timer: 0, cooldown: 0.6,
+  tail: 0, blink: 0, blinkT: 2.5, startle: 0, glance: 0, headShake: 0,
+  pounce: null, aim: null
+};
+
+const fly = {
+  x: cat.x + 200, y: 300, vx: 40, vy: -20,
+  wing: 0, boost: 0, orbA: 0, sparkleT: 0
+};
+
+const particles = [];
+const texts = [];
+const MISS = ['…', 'raté !', 'pfff…', 'grrr', 'encore ?!'];
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  GROUND = H * 0.8;
+  if (!cat.pounce) cat.y = GROUND;
+  cat.x = clamp(cat.x, 60, W - 60);
+}
+
+function addText(x, y, str, color) {
+  texts.push({ x, y, str, color: color || '#4a3423', life: 1.1, max: 1.1 });
+}
+
+function catHeadPos() {
+  return { x: cat.x + cat.facing * 36, y: cat.y - 66 };
+}
+
+function dodgeFly() {
+  const dir = (fly.x - cat.x) >= 0 ? 1 : -1;
+  fly.vx = dir * 520;
+  fly.vy = -240;
+  fly.boost = 0.55;
+}
+
+function startCrouch() {
+  cat.state = 'crouch';
+  cat.timer = laser.on ? 0.35 : 0.55;
+  if (!laser.on) {
+    const lead = 0.28;
+    cat.aim = {
+      x: fly.x + fly.vx * lead + rand(-26, 26),
+      y: fly.y + fly.vy * lead + rand(-14, 14)
+    };
+  } else {
+    cat.aim = { x: mouse.x + rand(-18, 18), y: mouse.y + rand(-12, 12) };
+  }
+}
+
+function startPounce() {
+  const aim = cat.aim || { x: cat.x + cat.facing * 120, y: GROUND - 60 };
+  const x1 = clamp(aim.x, 50, W - 50);
+  const arc = clamp(GROUND - aim.y + 40, 110, 330);
+  cat.pounce = { t: 0, dur: 0.45 + arc / 900, x0: cat.x, x1, arc, dodge: false, aimY: aim.y };
+  if (Math.abs(x1 - cat.x) > 8) cat.facing = x1 > cat.x ? 1 : -1;
+  cat.state = 'pounce';
+}
+
+function landPounce() {
+  cat.pounce = null;
+  cat.y = GROUND;
+  for (let i = 0; i < 10; i++) {
+    particles.push({
+      x: cat.x + rand(-30, 30), y: GROUND, vx: rand(-90, 90), vy: rand(-120, -20),
+      r: rand(2, 5), life: rand(0.3, 0.6), max: 0.6, kind: 'dust'
+    });
+  }
+  addText(cat.x, cat.y - 150, laser.on ? '!' : MISS[(Math.random() * MISS.length) | 0], laser.on ? '#c62828' : '#4a3423');
+  cat.state = 'frustrated';
+  cat.timer = 0.9;
+  cat.cooldown = laser.on ? 0.55 : 1.4;
+}
+
+function updateCat(dt) {
+  cat.tail += dt * (laser.on ? 9 : 5);
+  cat.cooldown = Math.max(0, cat.cooldown - dt);
+  cat.startle = Math.max(0, cat.startle - dt);
+  cat.glance = Math.max(0, cat.glance - dt);
+  cat.blink = Math.max(0, cat.blink - dt);
+  cat.blinkT -= dt;
+  if (cat.blinkT <= 0) { cat.blink = 0.15; cat.blinkT = 2 + Math.random() * 3; }
+
+  const tgt = laser.on ? mouse : fly;
+  const dx = tgt.x - cat.x;
+
+  switch (cat.state) {
+    case 'idle': {
+      cat.facing = dx >= 0 ? 1 : -1;
+      if (cat.cooldown <= 0) {
+        if (Math.abs(dx) > (laser.on ? 200 : 240)) cat.state = 'stalk';
+        else startCrouch();
+      }
+      break;
+    }
+    case 'stalk': {
+      const sp = laser.on ? 230 : 130;
+      cat.facing = dx >= 0 ? 1 : -1;
+      cat.x += cat.facing * sp * dt;
+      if (Math.abs(dx) < (laser.on ? 150 : 170)) cat.state = 'idle';
+      break;
+    }
+    case 'crouch': {
+      cat.timer -= dt;
+      if (cat.timer <= 0) startPounce();
+      break;
+    }
+    case 'pounce': {
+      const p = cat.pounce;
+      p.t += dt;
+      const u = Math.min(1, p.t / p.dur);
+      const e = 1 - Math.pow(1 - u, 2);
+      cat.x = p.x0 + (p.x1 - p.x0) * e;
+      cat.y = GROUND - Math.sin(Math.PI * u) * p.arc;
+      if (u > 0.42 && !p.dodge && !laser.on) { p.dodge = true; dodgeFly(); }
+      if (u >= 1) landPounce();
+      break;
+    }
+    case 'frustrated': {
+      cat.timer -= dt;
+      cat.headShake = Math.sin(cat.timer * 30) * 0.12 * cat.timer;
+      if (cat.timer <= 0) { cat.state = 'idle'; cat.headShake = 0; }
+      break;
+    }
+  }
+}
+
+function updateFly(dt, t) {
+  fly.wing += dt * (laser.on ? 34 : 20);
+  fly.boost = Math.max(0, fly.boost - dt);
+  const head = catHeadPos();
+
+  if (laser.on) {
+    fly.orbA += dt * 2.6;
+    const r = 72 + Math.sin(t * 3) * 18;
+    const tx = head.x + Math.cos(fly.orbA) * r;
+    const ty = head.y - 26 + Math.sin(fly.orbA) * r * 0.45;
+    const k = Math.min(1, dt * 5);
+    fly.vx = (tx - fly.x) * 6;
+    fly.vy = (ty - fly.y) * 6;
+    fly.x += (tx - fly.x) * k;
+    fly.y += (ty - fly.y) * k;
+    fly.sparkleT -= dt;
+    if (fly.sparkleT <= 0) {
+      fly.sparkleT = 0.12;
+      particles.push({
+        x: fly.x, y: fly.y, vx: rand(-20, 20), vy: rand(-30, 10),
+        r: rand(1.5, 3), life: 0.6, max: 0.6, kind: 'spark'
+      });
+    }
+    if (Math.hypot(fly.x - head.x, fly.y - head.y) < 62) cat.glance = 0.35;
+  } else {
+    const hx = cat.x - cat.facing * 100 + Math.sin(t * 0.6) * 150;
+    const hy = GROUND - 150 + Math.sin(t * 1.1) * 60;
+    const dvx = (hx - fly.x) * 1.5 + Math.sin(t * 3.7) * 70;
+    const dvy = (hy - fly.y) * 1.5 + Math.cos(t * 2.9) * 60;
+    fly.vx += (dvx - fly.vx) * Math.min(1, dt * 2.5);
+    fly.vy += (dvy - fly.vy) * Math.min(1, dt * 2.5);
+    const maxS = fly.boost > 0 ? 540 : 210;
+    const s = Math.hypot(fly.vx, fly.vy);
+    if (s > maxS) { fly.vx *= maxS / s; fly.vy *= maxS / s; }
+    fly.x += fly.vx * dt;
+    fly.y += fly.vy * dt;
+    if (fly.x < 30) { fly.x = 30; fly.vx = Math.abs(fly.vx); }
+    if (fly.x > W - 30) { fly.x = W - 30; fly.vx = -Math.abs(fly.vx); }
+    if (fly.y < 50) { fly.y = 50; fly.vy = Math.abs(fly.vy); }
+    if (fly.y > GROUND - 30) { fly.y = GROUND - 30; fly.vy = -Math.abs(fly.vy); }
+  }
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBG() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#f7e3bd');
+  g.addColorStop(1, '#eec996');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  const ww = Math.min(210, W * 0.2), wh = ww * 1.3;
+  const wx = W - ww - Math.max(40, W * 0.06), wy = 50;
+  ctx.fillStyle = '#2c3a66';
+  roundRect(wx, wy, ww, wh, 10);
+  ctx.fill();
+  ctx.fillStyle = '#f7f2d0';
+  ctx.beginPath();
+  ctx.arc(wx + ww * 0.68, wy + wh * 0.26, ww * 0.13, 0, 7);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  for (let i = 0; i < 9; i++) {
+    ctx.fillRect(wx + 12 + ((i * 53) % (ww - 24)), wy + 12 + ((i * 97) % (wh - 24)), 2, 2);
+  }
+  ctx.strokeStyle = '#a9805a';
+  ctx.lineWidth = 8;
+  roundRect(wx, wy, ww, wh, 10);
+  ctx.stroke();
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(wx + ww / 2, wy);
+  ctx.lineTo(wx + ww / 2, wy + wh);
+  ctx.moveTo(wx, wy + wh / 2);
+  ctx.lineTo(wx + ww, wy + wh / 2);
+  ctx.stroke();
+
+  ctx.fillStyle = '#c99863';
+  ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.strokeStyle = 'rgba(120,80,40,0.3)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = 40; x < W + 60; x += 95) {
+    ctx.moveTo(x, GROUND);
+    ctx.lineTo(x - 40, H);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#b07f4e';
+  ctx.fillRect(0, GROUND - 8, W, 8);
+
+  const rugRx = Math.min(260, W * 0.3);
+  ctx.fillStyle = '#cf7a6a';
+  ctx.beginPath();
+  ctx.ellipse(cat.x, GROUND + 26, rugRx, 30, 0, 0, 7);
+  ctx.fill();
+  ctx.strokeStyle = '#b25f52';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.ellipse(cat.x, GROUND + 26, rugRx - 14, 22, 0, 0, 7);
+  ctx.stroke();
+}
+
+function drawEar(x, y, rot) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.fillStyle = '#f0973f';
+  ctx.beginPath();
+  ctx.moveTo(-7, 4);
+  ctx.lineTo(0, -16);
+  ctx.lineTo(8, 4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#f6b8a0';
+  ctx.beginPath();
+  ctx.moveTo(-3.5, 2);
+  ctx.lineTo(0, -9);
+  ctx.lineTo(4.5, 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawCat(t) {
+  const air = GROUND - cat.y;
+  const lift = Math.min(1, air / 280);
+  ctx.fillStyle = `rgba(60,35,15,${0.25 * (1 - lift * 0.6)})`;
+  ctx.beginPath();
+  ctx.ellipse(cat.x, GROUND + 10, 60 * (1 - lift * 0.45), 11 * (1 - lift * 0.45), 0, 0, 7);
+  ctx.fill();
+
+  const p = cat.state === 'pounce' ? cat.pounce : null;
+  const u = p ? Math.min(1, p.t / p.dur) : 0;
+  const crouch = cat.state === 'crouch';
+  const airborne = !!p;
+
+  const lookT = cat.glance > 0 ? fly : (laser.on ? mouse : fly);
+  const ldx = (lookT.x - cat.x) * cat.facing;
+  const ldy = lookT.y - (cat.y - 70);
+  const lookAng = Math.atan2(ldy, ldx);
+
+  ctx.save();
+  ctx.translate(cat.x, cat.y);
+  let rot = 0;
+  if (p) rot = Math.sin(Math.PI * u) * (p.aimY < GROUND - 60 ? -0.35 : 0.18);
+  if (crouch) rot = 0.04;
+  ctx.rotate(rot * cat.facing);
+  ctx.scale(cat.facing, 1);
+
+  const wig = crouch ? Math.sin(t * 26) * 3 : 0;
+  const bodyY = crouch ? -30 : -42;
+  const bodyRx = 48 + (airborne ? 8 : 0);
+  const bodyRy = crouch ? 21 : 27;
+
+  const wag = Math.sin(cat.tail) * (cat.state === 'frustrated' ? 0.6 : 1) * (laser.on ? 1.4 : 1);
+  ctx.strokeStyle = '#e8893a';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 11;
+  ctx.beginPath();
+  ctx.moveTo(-bodyRx + 10, bodyY);
+  ctx.bezierCurveTo(
+    -bodyRx - 26 + wig, bodyY - 8 + wag * 16,
+    -bodyRx - 40, bodyY - 52 + wag * 12,
+    -bodyRx - 16, bodyY - 72 + wag * 14
+  );
+  ctx.stroke();
+  ctx.fillStyle = '#c96a24';
+  ctx.beginPath();
+  ctx.arc(-bodyRx - 16, bodyY - 72 + wag * 14, 6.5, 0, 7);
+  ctx.fill();
+
+  ctx.strokeStyle = '#e8893a';
+  ctx.lineWidth = 10;
+  const footY = airborne ? bodyY + bodyRy + 2 : -5;
+  const frontX = airborne ? bodyRx + 20 : bodyRx - 16 + (crouch ? 4 : 0);
+  const backX = airborne ? -bodyRx - 4 : -bodyRx + 16 + wig;
+  ctx.beginPath();
+  ctx.moveTo(backX, bodyY + bodyRy - 8);
+  ctx.lineTo(backX + (airborne ? -6 : 0), footY);
+  ctx.moveTo(frontX, bodyY + bodyRy - 8);
+  ctx.lineTo(frontX + (airborne ? 8 : 0), footY);
+  ctx.stroke();
+  ctx.fillStyle = '#f6b26b';
+  ctx.beginPath();
+  ctx.arc(backX + (airborne ? -6 : 0), footY, 6, 0, 7);
+  ctx.arc(frontX + (airborne ? 8 : 0), footY, 6, 0, 7);
+  ctx.fill();
+
+  ctx.fillStyle = '#f0973f';
+  ctx.beginPath();
+  ctx.ellipse(wig * 0.4, bodyY, bodyRx, bodyRy, 0, 0, 7);
+  ctx.fill();
+  ctx.fillStyle = '#ffe3bd';
+  ctx.beginPath();
+  ctx.ellipse(wig * 0.4 + 8, bodyY + 9, bodyRx * 0.6, bodyRy * 0.55, 0, 0, 7);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(190,95,25,0.9)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  for (let i = -1; i <= 1; i++) {
+    ctx.moveTo(i * 18 + wig * 0.4, bodyY - bodyRy + 2);
+    ctx.quadraticCurveTo(i * 18 + wig * 0.4 + 4, bodyY - bodyRy + 12, i * 18 + wig * 0.4 - 2, bodyY - bodyRy + 20);
+  }
+  ctx.stroke();
+
+  const headX = bodyRx * 0.8 + (airborne ? 10 : 0) + wig * 0.5;
+  const headY = bodyY - bodyRy - 10 + (crouch ? 6 : 0);
+  ctx.save();
+  ctx.translate(headX, headY);
+  ctx.rotate(clamp(lookAng, -1, 1) * 0.28 + cat.headShake);
+
+  const earFlat = cat.state === 'frustrated' ? 1 : 0;
+  const earUp = cat.startle > 0 ? 1 : 0;
+  drawEar(-13, -14, -0.5 + earFlat * 0.9 - earUp * 0.15);
+  drawEar(11, -16, 0.35 - earFlat * 0.9 + earUp * 0.15);
+
+  ctx.fillStyle = '#f0973f';
+  ctx.beginPath();
+  ctx.arc(0, 0, 24, 0, 7);
+  ctx.fill();
+  ctx.fillStyle = '#ffe9cf';
+  ctx.beginPath();
+  ctx.ellipse(9, 7, 12, 9, 0, 0, 7);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(190,95,25,0.9)';
+  ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  ctx.moveTo(-6, -20); ctx.lineTo(-6, -12);
+  ctx.moveTo(0, -22); ctx.lineTo(0, -13);
+  ctx.moveTo(6, -20); ctx.lineTo(6, -12);
+  ctx.stroke();
+
+  const blinkS = cat.blink > 0 ? 0.12 : 1;
+  const px = clamp(Math.cos(lookAng), -1, 1) * 3.2;
+  const py = clamp(Math.sin(lookAng), -1, 1) * 2.6;
+  for (const ex of [-9, 9]) {
+    ctx.fillStyle = '#9ccc65';
+    ctx.beginPath();
+    ctx.ellipse(ex, -2, 5.4, 6.2 * blinkS, 0, 0, 7);
+    ctx.fill();
+    if (blinkS > 0.5) {
+      ctx.fillStyle = '#26301d';
+      ctx.beginPath();
+      ctx.ellipse(ex + px, -2 + py, 2.3, 4.6, 0, 0, 7);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      ctx.arc(ex + px - 1, -4 + py, 1, 0, 7);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = '#3c2f1e';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ex - 5, -2);
+      ctx.lineTo(ex + 5, -2);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = '#e2606e';
+  ctx.beginPath();
+  ctx.moveTo(13, 4);
+  ctx.lineTo(18, 4);
+  ctx.lineTo(15.5, 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#7a4a22';
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(15.5, 8);
+  ctx.quadraticCurveTo(12, 12, 9, 9);
+  ctx.moveTo(15.5, 8);
+  ctx.quadraticCurveTo(19, 12, 22, 9);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(90,60,30,0.55)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(16, 8); ctx.lineTo(34, 4);
+  ctx.moveTo(16, 10); ctx.lineTo(34, 11);
+  ctx.moveTo(16, 12); ctx.lineTo(33, 18);
+  ctx.moveTo(-2, 8); ctx.lineTo(-18, 4);
+  ctx.moveTo(-2, 10); ctx.lineTo(-18, 11);
+  ctx.moveTo(-2, 12); ctx.lineTo(-17, 18);
+  ctx.stroke();
+
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawFly() {
+  const flap = Math.sin(fly.wing);
+  const ang = clamp(Math.atan2(fly.vy, Math.abs(fly.vx) + 40) * 0.4, -0.5, 0.5);
+  ctx.save();
+  ctx.translate(fly.x, fly.y);
+  ctx.rotate(ang);
+  const ws = 0.3 + 0.7 * Math.abs(flap);
+  for (const side of [-1, 1]) {
+    ctx.save();
+    ctx.translate(side * 3, -2);
+    ctx.scale(ws, 1);
+    ctx.fillStyle = 'rgba(255,159,67,0.92)';
+    ctx.beginPath();
+    ctx.ellipse(side * 10, -6, 13, 9, side * 0.5, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,213,79,0.95)';
+    ctx.beginPath();
+    ctx.ellipse(side * 8, -4, 7, 5, side * 0.5, 0, 7);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(side * 2, 3);
+    ctx.scale(ws * 0.8, 0.8);
+    ctx.fillStyle = 'rgba(255,183,77,0.85)';
+    ctx.beginPath();
+    ctx.ellipse(side * 8, 4, 9, 6, side * -0.4, 0, 7);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#5d4037';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 3.2, 9, 0, 0, 7);
+  ctx.fill();
+  ctx.strokeStyle = '#5d4037';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(-1, -8); ctx.quadraticCurveTo(-5, -16, -8, -17);
+  ctx.moveTo(1, -8); ctx.quadraticCurveTo(5, -16, 8, -17);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLaser() {
+  if (!laser.on) return;
+  const flick = 1 + Math.sin(T * 31) * 0.15;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createRadialGradient(mouse.x, mouse.y, 0, mouse.x, mouse.y, 26 * flick);
+  g.addColorStop(0, 'rgba(255,70,70,0.9)');
+  g.addColorStop(0.3, 'rgba(255,40,40,0.45)');
+  g.addColorStop(1, 'rgba(255,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(mouse.x, mouse.y, 26 * flick, 0, 7);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#ff2b2b';
+  ctx.beginPath();
+  ctx.arc(mouse.x, mouse.y, 5 * flick, 0, 7);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath();
+  ctx.arc(mouse.x, mouse.y, 2, 0, 7);
+  ctx.fill();
+}
+
+function drawParticles() {
+  for (const q of particles) {
+    const a = q.life / q.max;
+    if (q.kind === 'dust') {
+      ctx.fillStyle = `rgba(190,155,115,${0.7 * a})`;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, q.r * (2 - a), 0, 7);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = `rgba(255,220,120,${0.9 * a})`;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, q.r * a + 0.4, 0, 7);
+      ctx.fill();
+    }
+  }
+}
+
+function drawTexts() {
+  ctx.textAlign = 'center';
+  ctx.font = '700 22px Trebuchet MS, system-ui, sans-serif';
+  for (const tx of texts) {
+    ctx.globalAlpha = Math.min(1, (tx.life / tx.max) * 1.6);
+    ctx.fillStyle = tx.color;
+    ctx.fillText(tx.str, tx.x, tx.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+let last = performance.now();
+let T = 0;
+
+function loop(ts) {
+  const dt = Math.min(0.033, (ts - last) / 1000 || 0.016);
+  last = ts;
+  T += dt;
+
+  updateFly(dt, T);
+  updateCat(dt);
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const q = particles[i];
+    q.life -= dt;
+    q.x += q.vx * dt;
+    q.y += q.vy * dt;
+    q.vy += (q.kind === 'dust' ? 160 : -20) * dt;
+    if (q.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const q = texts[i];
+    q.life -= dt;
+    q.y -= 26 * dt;
+    if (q.life <= 0) texts.splice(i, 1);
+  }
+
+  drawBG();
+  drawParticles();
+  drawCat(T);
+  drawFly();
+  drawLaser();
+  drawTexts();
+
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('pointermove', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+});
+window.addEventListener('pointerdown', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+  laser.on = !laser.on;
+  canvas.style.cursor = laser.on ? 'none' : 'default';
+  hint.classList.add('hidden');
+  if (laser.on) {
+    cat.startle = 0.7;
+    addText(cat.x, cat.y - 130, '!', '#c62828');
+    cat.cooldown = Math.min(cat.cooldown, 0.15);
+  }
+});
+
+resize();
+mouse.x = W / 2;
+mouse.y = H / 2;
+fly.x = clamp(fly.x, 60, W - 60);
+fly.y = GROUND - 150;
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
