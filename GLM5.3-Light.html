@@ -557,7 +557,7 @@ function drawParticles() {
 
 function drawTexts() {
   ctx.textAlign = 'center';
-  ctx.font = '700 22px "Trebuchet MS", system-ui, sans-serif';
+  ctx.font = '700 22px Trebuchet MS, system-ui, sans-serif';
   for (const tx of texts) {
     ctx.globalAlpha = Math.min(1, (tx.life / tx.max) * 1.6);
     ctx.fillStyle = tx.color;
