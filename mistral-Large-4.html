@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Le chat, le papillon et le laser</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #191331;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #scene { display: block; touch-action: none; }
+  body.laser-cursor, body.laser-cursor * { cursor: none !important; }
+  #hint {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    color: #fff; background: rgba(20, 14, 40, .55);
+    border: 1px solid rgba(255, 255, 255, .18);
+    padding: 10px 18px; border-radius: 999px;
+    font-size: 15px; letter-spacing: .3px; white-space: nowrap;
+    backdrop-filter: blur(6px); transition: opacity .8s;
+    pointer-events: none; z-index: 10;
+  }
+  #hint.hidden { opacity: 0; }
+  #title {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    color: rgba(255, 255, 255, .55); font-size: 13px; letter-spacing: .4px;
+    pointer-events: none; z-index: 10; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="hint">🦋 Le chat poursuit le papillon… cliquez pour activer le laser 🔴</div>
+<div id="title">le chat n'attrape jamais le papillon — cliquez, le laser change tout</div>
+<script>
+'use strict';
+
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
+
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const dist = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
+const easeOut = k => 1 - (1 - k) * (1 - k);
+
+let W = 0, H = 0, DPR = 1;
+let time = 0;
+
+const cat = {
+  x: 0, y: 0, s: 1, lean: 0, jy: 0,
+  pawL: { x: 0, y: 0 }, pawR: { x: 0, y: 0 },
+  swipe: null, swipeCooldown: 0, holdLaser: false,
+  blink: 0, nextBlink: 2.5, earTwitch: 0, nextTwitch: 3,
+};
+const bfly = {
+  x: 0, y: 0, vx: 40, vy: -20, heading: -Math.PI / 2, flap: 0,
+  mode: 'wander', anchorA: Math.random() * TAU,
+  swirlT: 0, swirlDur: 3.4, swirlA: 0,
+  trail: [],
+};
+const mouse = { x: 0, y: 0, px: 0, py: 0, speed: 0 };
+const laser = { active: false };
+let attention = 'butterfly';
+let distractT = 0;
+let particles = [];
+let exclaim = 0;
+let heartT = 0;
+
+const dust = [];
+for (let i = 0; i < 46; i++) dust.push({ x: Math.random(), y: Math.random(), r: 1 + Math.random() * 2.2, p: Math.random() * TAU, v: 0.008 + Math.random() * 0.02 });
+const grass = [];
+for (let i = 0; i < 26; i++) grass.push({ x: Math.random(), h: 22 + Math.random() * 42, p: Math.random() * TAU });
+
+function layout() {
+  cat.x = W * 0.5;
+  cat.y = H * 0.86;
+  cat.s = clamp(Math.min(W, H) / 640, 0.55, 1.35);
+  if (!cat.pawL.x) {
+    cat.pawL.x = cat.x - 20 * cat.s; cat.pawL.y = cat.y - 6 * cat.s;
+    cat.pawR.x = cat.x + 20 * cat.s; cat.pawR.y = cat.y - 6 * cat.s;
+  }
+  if (!bfly.x) { bfly.x = cat.x + 170 * cat.s; bfly.y = cat.y - 230 * cat.s; }
+  if (!mouse.x) { mouse.x = W / 2; mouse.y = H * 0.35; mouse.px = mouse.x; mouse.py = mouse.y; }
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  layout();
+}
+window.addEventListener('resize', resize);
+resize();
+
+function ell(x, y, rx, ry, rot, fill) {
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot || 0, 0, TAU);
+  ctx.fillStyle = fill; ctx.fill();
+}
+function circle(x, y, r, fill) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+  ctx.fillStyle = fill; ctx.fill();
+}
+function line(x1, y1, x2, y2, w, color) {
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+  ctx.lineWidth = w; ctx.strokeStyle = color; ctx.lineCap = 'round'; ctx.stroke();
+}
+function heartPath(x, y, s) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.85);
+  ctx.bezierCurveTo(x - s * 1.15, y + s * 0.15, x - s * 0.55, y - s * 0.55, x, y - s * 0.1);
+  ctx.bezierCurveTo(x + s * 0.55, y - s * 0.55, x + s * 1.15, y + s * 0.15, x, y + s * 0.85);
+  ctx.closePath();
+}
+
+function headC() { return { x: cat.x + cat.lean, y: cat.y + cat.jy - 148 * cat.s }; }
+function shoulder(side) { return { x: cat.x + cat.lean + side * 26 * cat.s, y: cat.y + cat.jy - 96 * cat.s }; }
+function targetPos() {
+  if (bfly.mode === 'swirl' || attention === 'butterfly') return { x: bfly.x, y: bfly.y };
+  return { x: mouse.x, y: mouse.y };
+}
+function nearestPaw() {
+  const t = targetPos();
+  return dist(cat.pawL.x, cat.pawL.y, t.x, t.y) < dist(cat.pawR.x, cat.pawR.y, t.x, t.y) ? cat.pawL : cat.pawR;
+}
+
+function spawnHeart(x, y, size) {
+  particles.push({ type: 'heart', x, y, vx: (Math.random() - 0.5) * 26, vy: -34 - Math.random() * 26, life: 1.5, max: 1.5, size });
+}
+function spawnBurst(x, y, type) {
+  for (let i = 0; i < 10; i++) {
+    const a = Math.random() * TAU, sp = 40 + Math.random() * 90;
+    particles.push({ type, x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 30, life: 0.7 + Math.random() * 0.4, max: 1.1, size: 3 + Math.random() * 4 });
+  }
+}
+function spawnSwish(x, y) {
+  particles.push({ type: 'swish', x, y, life: 0.32, max: 0.32 });
+}
+
+function startSwipe(tx, ty) {
+  const side = tx < cat.x ? -1 : 1;
+  const p = side < 0 ? cat.pawL : cat.pawR;
+  cat.swipe = { t: 0, dur: 0.3, from: { x: p.x, y: p.y }, to: { x: tx, y: ty } };
+  cat.swipeCooldown = 0.55 + Math.random() * 0.4;
+  if (bfly.mode === 'wander') {
+    const ex = bfly.x - tx, ey = bfly.y - ty, ed = Math.hypot(ex, ey) || 1;
+    bfly.vx += ex / ed * 420 + (Math.random() - 0.5) * 120;
+    bfly.vy += ey / ed * 420 - 220;
+  }
+}
+
+function updateBfly(dt) {
+  const hc = headC();
+  if (bfly.mode === 'swirl') {
+    bfly.swirlT += dt;
+    bfly.swirlA += dt * TAU * 2.5 / bfly.swirlDur;
+    const px = bfly.x, py = bfly.y;
+    const r = (64 + 10 * Math.sin(bfly.swirlT * 5)) * cat.s;
+    bfly.x = hc.x + Math.cos(bfly.swirlA) * r;
+    bfly.y = hc.y + Math.sin(bfly.swirlA) * r * 0.55 - 10 * cat.s;
+    bfly.heading = Math.atan2(bfly.y - py, bfly.x - px) || bfly.heading;
+    bfly.flap += dt * 42;
+    if (bfly.swirlT >= bfly.swirlDur) {
+      bfly.mode = 'wander';
+      attention = 'butterfly';
+      exclaim = 1.1;
+      spawnBurst(hc.x + 40 * cat.s, hc.y - 70 * cat.s, 'spark');
+    }
+  } else {
+    bfly.anchorA += dt * 0.35;
+    const R = (150 + 70 * Math.sin(time * 0.45)) * cat.s;
+    const ax = hc.x + Math.cos(bfly.anchorA) * R;
+    const ay = hc.y + Math.sin(bfly.anchorA) * R * 0.75 - 30 * cat.s;
+    let dx = ax - bfly.x, dy = ay - bfly.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const tx = -dy / d, ty = dx / d;
+    const nx = Math.sin(time * 1.7 + bfly.anchorA * 3) * 60;
+    const ny = Math.cos(time * 2.3) * 60 - 30;
+    bfly.vx += ((dx / d * 190 + tx * 90 + nx) - bfly.vx) * Math.min(1, dt * 2.4);
+    bfly.vy += ((dy / d * 190 + ty * 90 + ny) - bfly.vy) * Math.min(1, dt * 2.4);
+
+    const s = cat.swipe;
+    if (s && dist(bfly.x, bfly.y, s.to.x, s.to.y) < 120 * cat.s) {
+      const ex = bfly.x - s.to.x, ey = bfly.y - s.to.y, ed = Math.hypot(ex, ey) || 1;
+      bfly.vx += ex / ed * 3120 * dt; bfly.vy += (ey / ed * 3120 - 960) * dt;
+    } else if (attention === 'butterfly') {
+      const p = nearestPaw();
+      if (dist(bfly.x, bfly.y, p.x, p.y) < 85 * cat.s) {
+        const ex = bfly.x - p.x, ey = bfly.y - p.y, ed = Math.hypot(ex, ey) || 1;
+        bfly.vx += ex / ed * 1200 * dt; bfly.vy += (ey / ed * 1200 - 480) * dt;
+      }
+    }
+    const sp = Math.hypot(bfly.vx, bfly.vy), maxSp = 300;
+    if (sp > maxSp) { bfly.vx *= maxSp / sp; bfly.vy *= maxSp / sp; }
+    bfly.x += bfly.vx * dt;
+    bfly.y += bfly.vy * dt;
+
+    const m = 26;
+    if (bfly.x < m) { bfly.x = m; bfly.vx = Math.abs(bfly.vx); }
+    if (bfly.x > W - m) { bfly.x = W - m; bfly.vx = -Math.abs(bfly.vx); }
+    if (bfly.y < 50) { bfly.y = 50; bfly.vy = Math.abs(bfly.vy); }
+    if (bfly.y > H - 60) { bfly.y = H - 60; bfly.vy = -Math.abs(bfly.vy); }
+
+    const th = Math.atan2(bfly.vy, bfly.vx);
+    let dh = th - bfly.heading;
+    while (dh > Math.PI) dh -= TAU;
+    while (dh < -Math.PI) dh += TAU;
+    bfly.heading += dh * Math.min(1, dt * 8);
+    bfly.flap += dt * (sp > 60 ? 34 : 14);
+  }
+  bfly.trail.push({ x: bfly.x, y: bfly.y });
+  if (bfly.trail.length > 14) bfly.trail.shift();
+}
+
+function updateCat(dt) {
+  const t = targetPos();
+  const hc = headC();
+
+  cat.swipeCooldown -= dt;
+  cat.nextBlink -= dt;
+  if (cat.nextBlink <= 0) { cat.blink = 0.12; cat.nextBlink = 2 + Math.random() * 3.5; }
+  if (cat.blink > 0) cat.blink -= dt;
+  cat.nextTwitch -= dt;
+  if (cat.nextTwitch <= 0) { cat.earTwitch = 0.3; cat.nextTwitch = 2.5 + Math.random() * 4; }
+  if (cat.earTwitch > 0) cat.earTwitch -= dt;
+
+  cat.lean += (clamp((t.x - cat.x) * 0.06, -16 * cat.s, 16 * cat.s) - cat.lean) * Math.min(1, dt * 6);
+
+  if (attention === 'laser') {
+    cat.x += (clamp(mouse.x, W * 0.12, W * 0.88) - cat.x) * Math.min(1, dt * 2.2);
+    const sh = shoulder(0);
+    const high = dist(mouse.x, mouse.y, sh.x, sh.y) > 125 * cat.s;
+    cat.jy = high ? -Math.abs(Math.sin(time * 5.5)) * 34 * cat.s : 0;
+  } else {
+    cat.x += (W * 0.5 - cat.x) * Math.min(1, dt * 2.2);
+    cat.jy = 0;
+  }
+
+  if (cat.swipe) {
+    cat.swipe.t += dt;
+    if (cat.swipe.t >= cat.swipe.dur) {
+      spawnSwish(cat.swipe.to.x, cat.swipe.to.y);
+      cat.swipe = null;
+    }
+  } else if (attention === 'butterfly' && bfly.mode === 'wander' &&
+             dist(bfly.x, bfly.y, hc.x, hc.y) < 165 * cat.s && cat.swipeCooldown <= 0) {
+    startSwipe(bfly.x, bfly.y);
+  } else if (attention === 'laser' && mouse.speed > 260 &&
+             dist(mouse.x, mouse.y, hc.x, hc.y) < 170 * cat.s && cat.swipeCooldown <= 0) {
+    startSwipe(mouse.x, mouse.y);
+  }
+
+  const reach = 125 * cat.s;
+  for (const side of [-1, 1]) {
+    const p = side < 0 ? cat.pawL : cat.pawR;
+    const sh = shoulder(side);
+    let des;
+    if (cat.swipe) {
+      const k = clamp(cat.swipe.t / cat.swipe.dur, 0, 1);
+      const back = k > 0.55 ? (k - 0.55) / 0.45 : 0;
+      des = {
+        x: cat.swipe.from.x + (cat.swipe.to.x - cat.swipe.from.x) * easeOut(k) - side * 22 * cat.s * back,
+        y: cat.swipe.from.y + (cat.swipe.to.y - cat.swipe.from.y) * easeOut(k) - 34 * cat.s * back,
+      };
+    } else {
+      const d = dist(t.x, t.y, sh.x, sh.y);
+      const ux = d > 0.001 ? (t.x - sh.x) / d : 0;
+      const uy = d > 0.001 ? (t.y - sh.y) / d : -1;
+      const engaged = attention === 'laser' || d < reach + 40 * cat.s;
+      if (engaged) {
+        let pull = Math.min(d, reach);
+        if (attention === 'butterfly' && bfly.mode !== 'swirl') pull = Math.max(18 * cat.s, Math.min(pull, d - 34 * cat.s));
+        des = { x: sh.x + ux * pull, y: sh.y + uy * pull };
+      } else {
+        des = { x: cat.x + cat.lean * 0.5 + side * 20 * cat.s, y: cat.y + cat.jy - 6 * cat.s };
+      }
+    }
+    const ease = cat.swipe ? 1 : Math.min(1, dt * 14);
+    p.x += (des.x - p.x) * ease;
+    p.y += (des.y - p.y) * ease;
+  }
+
+  for (const p of [cat.pawL, cat.pawR]) {
+    const d = dist(bfly.x, bfly.y, p.x, p.y);
+    const minD = 26 * cat.s;
+    if (d < minD) {
+      const nx = d > 0.001 ? (bfly.x - p.x) / d : 1;
+      const ny = d > 0.001 ? (bfly.y - p.y) / d : -1;
+      bfly.x = p.x + nx * minD;
+      bfly.y = p.y + ny * minD;
+      bfly.vx = nx * 260 + (Math.random() - 0.5) * 80;
+      bfly.vy = ny * 260 - 140;
+    }
+  }
+
+  if (attention === 'laser' && !cat.swipe) {
+    const p = nearestPaw();
+    if (dist(mouse.x, mouse.y, p.x, p.y) < 16 * cat.s && mouse.speed < 90) cat.holdLaser = true;
+    else if (mouse.speed > 140) cat.holdLaser = false;
+  } else {
+    cat.holdLaser = false;
+  }
+  if (cat.holdLaser) {
+    const p = nearestPaw();
+    p.x = mouse.x; p.y = mouse.y;
+    heartT -= dt;
+    if (heartT <= 0) {
+      heartT = 0.38;
+      spawnHeart(mouse.x + (Math.random() - 0.5) * 24, mouse.y - 16 * cat.s, (7 + Math.random() * 6) * cat.s);
+    }
+  }
+}
+
+function update(dt) {
+  time += dt;
+  mouse.speed = dist(mouse.x, mouse.y, mouse.px, mouse.py) / Math.max(dt, 1e-4);
+  mouse.px = mouse.x; mouse.py = mouse.y;
+
+  if (attention === 'laser') {
+    distractT += dt;
+    if (distractT > 3.4 && bfly.mode !== 'swirl') {
+      bfly.mode = 'swirl';
+      bfly.swirlT = 0;
+      const hc = headC();
+      bfly.swirlA = Math.atan2(bfly.y - hc.y, bfly.x - hc.x);
+    }
+  }
+
+  updateBfly(dt);
+  updateCat(dt);
+
+  exclaim = Math.max(0, exclaim - dt);
+  for (const p of particles) {
+    p.life -= dt;
+    p.x += (p.vx || 0) * dt;
+    p.y += (p.vy || 0) * dt;
+    if (p.type === 'heart') p.vy -= 12 * dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function drawCat() {
+  const s = cat.s, cx = cat.x + cat.lean, gy = cat.y + cat.jy;
+  const breathe = 1 + 0.02 * Math.sin(time * 2.6);
+
+  ctx.globalAlpha = 0.28;
+  ell(cx, gy + 8 * s, 95 * s, 13 * s, 0, '#000');
+  ctx.globalAlpha = 1;
+
+  const wag = Math.sin(time * 2.1) * 0.5 + (attention === 'laser' ? Math.sin(time * 7) * 0.35 : 0);
+  ctx.beginPath();
+  ctx.moveTo(cx + 62 * s, gy - 14 * s);
+  ctx.quadraticCurveTo(cx + 105 * s + wag * 30 * s, gy - 40 * s, cx + 92 * s + wag * 46 * s, gy - 92 * s);
+  ctx.lineWidth = 17 * s; ctx.strokeStyle = '#e8912f'; ctx.lineCap = 'round'; ctx.stroke();
+  circle(cx + 92 * s + wag * 46 * s, gy - 92 * s, 9 * s, '#c96f1e');
+
+  ell(cx, gy - 64 * s, 60 * s, 66 * s * breathe, 0, '#f5a142');
+  ell(cx, gy - 52 * s, 38 * s, 44 * s, 0, '#ffe3c2');
+  ctx.lineWidth = 5 * s; ctx.strokeStyle = '#d97f2b'; ctx.lineCap = 'round';
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + i * 34 * s, gy - 108 * s);
+    ctx.quadraticCurveTo(cx + i * 40 * s, gy - 80 * s, cx + i * 36 * s, gy - 56 * s);
+    ctx.stroke();
+  }
+
+  ell(cx - 36 * s, gy - 7 * s, 17 * s, 9 * s, 0, '#e8912f');
+  ell(cx + 36 * s, gy - 7 * s, 17 * s, 9 * s, 0, '#e8912f');
+
+  for (const side of [-1, 1]) {
+    const p = side < 0 ? cat.pawL : cat.pawR;
+    const sh = shoulder(side);
+    line(sh.x, sh.y, p.x, p.y, 13 * s, '#f5a142');
+    circle(p.x, p.y, 11 * s, '#ffcf9e');
+  }
+
+  const hc = headC();
+  const t = targetPos();
+  const rot = clamp(Math.atan2(t.y - hc.y, t.x - hc.x) * 0.22, -0.4, 0.4);
+  ctx.save();
+  ctx.translate(hc.x, hc.y);
+  ctx.rotate(rot);
+
+  const twitch = cat.earTwitch > 0 ? Math.sin(cat.earTwitch * 40) * 4 * s : 0;
+  for (const side of [-1, 1]) {
+    const ex = side * 30 * s, ey = -40 * s;
+    ctx.beginPath();
+    ctx.moveTo(ex - 16 * s, ey + 12 * s);
+    ctx.lineTo(ex + twitch * side, ey - 18 * s);
+    ctx.lineTo(ex + 16 * s, ey + 12 * s);
+    ctx.closePath(); ctx.fillStyle = '#f5a142'; ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(ex - 8 * s, ey + 8 * s);
+    ctx.lineTo(ex + twitch * side * 0.6, ey - 8 * s);
+    ctx.lineTo(ex + 8 * s, ey + 8 * s);
+    ctx.closePath(); ctx.fillStyle = '#ff9fb0'; ctx.fill();
+  }
+
+  circle(0, 0, 47 * s, '#f5a142');
+  for (let i = -1; i <= 1; i++) line(i * 12 * s, -40 * s, i * 10 * s, -28 * s, 4 * s, '#d97f2b');
+
+  const lookX = clamp((t.x - hc.x) / (60 * s), -1, 1);
+  const lookY = clamp((t.y - hc.y) / (60 * s), -1, 1);
+  const blinkScale = cat.blink > 0 ? 0.12 : 1;
+  for (const side of [-1, 1]) {
+    const ex = side * 17 * s, ey = -6 * s;
+    if (cat.holdLaser) {
+      ctx.beginPath();
+      ctx.arc(ex, ey + 3 * s, 8 * s, Math.PI * 1.15, Math.PI * 1.85);
+      ctx.lineWidth = 4 * s; ctx.strokeStyle = '#4a2c14'; ctx.stroke();
+    } else {
+      ell(ex, ey, 9.5 * s, 11 * s * blinkScale, 0, '#fff');
+      if (cat.blink <= 0) {
+        circle(ex + lookX * 4.5 * s, ey + lookY * 4 * s, 5 * s, '#3a2410');
+        circle(ex + lookX * 4.5 * s - 1.6 * s, ey + lookY * 4 * s - 1.8 * s, 1.7 * s, '#fff');
+      }
+    }
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(-4.5 * s, 10 * s); ctx.lineTo(4.5 * s, 10 * s); ctx.lineTo(0, 15 * s);
+  ctx.closePath(); ctx.fillStyle = '#ff8fa3'; ctx.fill();
+  ctx.lineWidth = 2.4 * s; ctx.strokeStyle = '#4a2c14'; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(-4 * s, 17 * s, 4 * s, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc(4 * s, 17 * s, 4 * s, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.6 * s;
+  for (const side of [-1, 1]) {
+    for (let i = 0; i < 3; i++) {
+      const wy = 8 * s + i * 5 * s;
+      ctx.beginPath();
+      ctx.moveTo(side * 30 * s, wy - 4 * s);
+      ctx.lineTo(side * 52 * s, wy + (i - 1) * 4 * s);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawBfly() {
+  for (let i = 0; i < bfly.trail.length; i++) {
+    const p = bfly.trail[i];
+    ctx.globalAlpha = (i / bfly.trail.length) * 0.18;
+    circle(p.x, p.y, 1 + 4 * cat.s * (i / bfly.trail.length), '#e0b3ff');
+  }
+  ctx.globalAlpha = 1;
+
+  const flap = Math.abs(Math.sin(bfly.flap));
+  const wx = 0.25 + 0.75 * flap;
+  const sc = 1.15 * cat.s;
+  ctx.save();
+  ctx.translate(bfly.x, bfly.y);
+  ctx.rotate(bfly.heading + Math.PI / 2 + Math.sin(time * 2.2) * 0.18);
+
+  for (const side of [-1, 1]) {
+    ctx.save();
+    ctx.scale(side * wx, 1);
+    const g = ctx.createRadialGradient(6, -6, 2, 6, -4, 17);
+    g.addColorStop(0, '#ff9ad5');
+    g.addColorStop(1, '#8f6bff');
+    ell(6 * sc, -6 * sc, 13 * sc, 10 * sc, -0.45, g);
+    ell(5 * sc, 6 * sc, 9 * sc, 7 * sc, 0.5, g);
+    circle(8 * sc, -8 * sc, 2.4 * sc, 'rgba(255,255,255,0.9)');
+    circle(5 * sc, -3 * sc, 1.6 * sc, 'rgba(255,255,255,0.8)');
+    circle(6 * sc, 7 * sc, 1.6 * sc, 'rgba(255,255,255,0.8)');
+    ctx.restore();
+  }
+
+  ell(0, 0, 3.2 * sc, 10 * sc, 0, '#4a2c5a');
+  circle(0, -10 * sc, 3.4 * sc, '#4a2c5a');
+  ctx.strokeStyle = '#4a2c5a'; ctx.lineWidth = 1.4 * sc; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-1.5 * sc, -12 * sc); ctx.quadraticCurveTo(-6 * sc, -18 * sc, -8 * sc, -17 * sc); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(1.5 * sc, -12 * sc); ctx.quadraticCurveTo(6 * sc, -18 * sc, 8 * sc, -17 * sc); ctx.stroke();
+  circle(-8 * sc, -17 * sc, 1.6 * sc, '#4a2c5a');
+  circle(8 * sc, -17 * sc, 1.6 * sc, '#4a2c5a');
+  ctx.restore();
+}
+
+function drawLaser() {
+  const x = mouse.x, y = mouse.y, pulse = 1 + 0.15 * Math.sin(time * 9);
+  const g = ctx.createRadialGradient(x, y, 0, x, y, 26 * pulse);
+  g.addColorStop(0, 'rgba(255,60,60,0.9)');
+  g.addColorStop(0.35, 'rgba(255,30,30,0.45)');
+  g.addColorStop(1, 'rgba(255,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, 26 * pulse, 0, TAU); ctx.fill();
+  ctx.globalCompositeOperation = 'lighter';
+  circle(x, y, 5.5 * pulse, '#ff2b2b');
+  circle(x, y, 2.6, '#ffd9d9');
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.beginPath(); ctx.arc(x, y, 9 + 2 * Math.sin(time * 6), 0, TAU);
+  ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,80,80,0.8)'; ctx.stroke();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const k = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = k;
+    if (p.type === 'heart') {
+      heartPath(p.x, p.y, p.size * (0.7 + 0.3 * k));
+      ctx.fillStyle = '#ff5f8f'; ctx.fill();
+    } else if (p.type === 'spark') {
+      circle(p.x, p.y, p.size * k, '#ffe066');
+    } else if (p.type === 'swish') {
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, (8 + i * 7) * (1.2 - k), -0.9 + i * 0.5, 0.5 + i * 0.5);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function render() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#241b4d');
+  g.addColorStop(0.55, '#5b3a7a');
+  g.addColorStop(1, '#e8956b');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const d of dust) {
+    const x = (((d.x * W + Math.sin(time * d.v * 8 + d.p) * 14) % W) + W) % W;
+    const y = (d.y * H * 0.7 + time * d.v * 30) % (H * 0.7);
+    ctx.globalAlpha = 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(time * 2 + d.p));
+    circle(x, y, d.r, '#fff7e0');
+  }
+  ctx.globalAlpha = 1;
+
+  const gg = ctx.createLinearGradient(0, H - 120, 0, H);
+  gg.addColorStop(0, 'rgba(38,64,44,0)');
+  gg.addColorStop(1, 'rgba(24,48,34,0.9)');
+  ctx.fillStyle = gg;
+  ctx.fillRect(0, H - 120, W, 120);
+
+  ctx.strokeStyle = 'rgba(46,110,66,0.8)';
+  for (const gr of grass) {
+    const bx = gr.x * W, by = H + 4;
+    const sway = Math.sin(time * 1.6 + gr.p) * 8;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.quadraticCurveTo(bx + sway * 0.5, by - gr.h * 0.6, bx + sway, by - gr.h);
+    ctx.stroke();
+  }
+
+  if (laser.active && cat.holdLaser) drawLaser();
+  drawCat();
+  drawBfly();
+  drawParticles();
+  if (laser.active && !cat.holdLaser) drawLaser();
+
+  if (exclaim > 0) {
+    const hc = headC();
+    ctx.globalAlpha = clamp(exclaim, 0, 1);
+    ctx.font = 'bold ' + Math.round(34 * cat.s) + 'px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText('!', hc.x + 40 * cat.s, hc.y - 66 * cat.s - (1 - exclaim) * 10);
+    ctx.globalAlpha = 1;
+  }
+}
+
+window.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  laser.active = true;
+  document.body.classList.add('laser-cursor');
+  hint.classList.add('hidden');
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  mouse.px = e.clientX; mouse.py = e.clientY;
+  attention = 'laser';
+  distractT = 0;
+  cat.holdLaser = false;
+  if (bfly.mode === 'swirl') bfly.mode = 'wander';
+  exclaim = 0.8;
+  spawnBurst(mouse.x, mouse.y, 'spark');
+});
+window.addEventListener('pointermove', (e) => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+});
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+let last = performance.now();
+function frame(now) {
+  const dt = clamp((now - last) / 1000, 0.001, 0.05);
+  last = now;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+window.__demo = {
+  cat, bfly, laser, mouse,
+  get attention() { return attention; },
+  get particles() { return particles; },
+};
+</script>
+</body>
+</html>
